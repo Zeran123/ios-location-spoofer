@@ -4,7 +4,7 @@
 
 scripts:
   - match: ^https?:\/\/(?:gs-loc(?:-cn)?\.apple\.com|bluedot\.is\.autonavi\.com(?:\.gds\.alibabadns\.com)?)\/clls\/wloc(?:\?.*)?$
-    name: https://raw.githubusercontent.com/mekos2772/ios-location-spoofer/main/Shadowrocket/location-spoofer.js
+    name: https://raw.githubusercontent.com/mekos2772/ios-location-spoofer/main/location-spoofer.js
     type: response
     require-body: true
     binary-body-mode: true
