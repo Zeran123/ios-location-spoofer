@@ -412,8 +412,13 @@
   }
 
   function coordToInt(value) {
-    // 使用 Math.trunc 精确匹配 Go: int64(coord * 1e8)
-    return Math.trunc(Number(value) * 100000000);
+    // Match Go's int64(coord * 1e8), while smoothing JS floating-point edge noise.
+    var scaled = Number(value) * 100000000;
+    var nearest = Math.round(scaled);
+    if (Math.abs(scaled - nearest) < 0.000001) {
+      return nearest;
+    }
+    return Math.trunc(scaled);
   }
 
   function parseBoolean(value, defaultValue) {
@@ -436,11 +441,44 @@
     return Object.prototype.hasOwnProperty.call(obj, key);
   }
 
-  function randomInRange(start, end) {
-    if (start === end) {
-      return start;
+  function randomCoordinatePrecision() {
+    return 4 + Math.floor(Math.random() * 3);
+  }
+
+  function roundToDecimalPlaces(value, places) {
+    var factor = Math.pow(10, places);
+    return Math.round(Number(value) * factor) / factor;
+  }
+
+  function randomCoordinateAtPrecision(start, end, places) {
+    var factor = Math.pow(10, places);
+    var min = Math.ceil(start * factor);
+    var max = Math.floor(end * factor);
+    if (min > max) {
+      return null;
     }
-    return start + Math.random() * (end - start);
+    return (min + Math.floor(Math.random() * (max - min + 1))) / factor;
+  }
+
+  function randomInRange(start, end) {
+    var places = randomCoordinatePrecision();
+    if (start === end) {
+      return roundToDecimalPlaces(start, places);
+    }
+
+    var value = randomCoordinateAtPrecision(start, end, places);
+    if (value != null) {
+      return value;
+    }
+
+    for (places = 6; places >= 4; places -= 1) {
+      value = randomCoordinateAtPrecision(start, end, places);
+      if (value != null) {
+        return value;
+      }
+    }
+
+    return roundToDecimalPlaces(start, 6);
   }
 
   function normalizeCoordinateRange(cfg, input, startKey, endKey, legacyKey, min, max) {
