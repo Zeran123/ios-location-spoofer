@@ -12,8 +12,10 @@
   var DEFAULT_CONFIG = {
     enabled: true,
     mode: "response",
-    latitude: 37.3349,
-    longitude: -122.00902,
+    latitude_start: 37.3349,
+    latitude_end: 37.3349,
+    longitude_start: -122.00902,
+    longitude_end: -122.00902,
     horizontalAccuracy: 39,
     verticalAccuracy: 1000,
     altitude: 530,
@@ -410,8 +412,13 @@
   }
 
   function coordToInt(value) {
-    // 使用 Math.trunc 精确匹配 Go: int64(coord * 1e8)
-    return Math.trunc(Number(value) * 100000000);
+    // Match Go's int64(coord * 1e8), while smoothing JS floating-point edge noise.
+    var scaled = Number(value) * 100000000;
+    var nearest = Math.round(scaled);
+    if (Math.abs(scaled - nearest) < 0.000001) {
+      return nearest;
+    }
+    return Math.trunc(scaled);
   }
 
   function parseBoolean(value, defaultValue) {
@@ -428,6 +435,80 @@
       }
     }
     return defaultValue;
+  }
+
+  function hasOwn(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function randomCoordinatePrecision() {
+    return 4 + Math.floor(Math.random() * 3);
+  }
+
+  function roundToDecimalPlaces(value, places) {
+    var factor = Math.pow(10, places);
+    return Math.round(Number(value) * factor) / factor;
+  }
+
+  function randomCoordinateAtPrecision(start, end, places) {
+    var factor = Math.pow(10, places);
+    var min = Math.ceil(start * factor);
+    var max = Math.floor(end * factor);
+    if (min > max) {
+      return null;
+    }
+    return (min + Math.floor(Math.random() * (max - min + 1))) / factor;
+  }
+
+  function randomInRange(start, end) {
+    var places = randomCoordinatePrecision();
+    if (start === end) {
+      return roundToDecimalPlaces(start, places);
+    }
+
+    var value = randomCoordinateAtPrecision(start, end, places);
+    if (value != null) {
+      return value;
+    }
+
+    for (places = 6; places >= 4; places -= 1) {
+      value = randomCoordinateAtPrecision(start, end, places);
+      if (value != null) {
+        return value;
+      }
+    }
+
+    return roundToDecimalPlaces(start, 6);
+  }
+
+  function normalizeCoordinateRange(cfg, input, startKey, endKey, legacyKey, min, max) {
+    var hasStart = hasOwn(input, startKey);
+    var hasEnd = hasOwn(input, endKey);
+    var hasLegacy = hasOwn(input, legacyKey) && input[legacyKey] !== "" && input[legacyKey] != null;
+
+    if (hasLegacy && !hasStart && !hasEnd) {
+      cfg[startKey] = input[legacyKey];
+      cfg[endKey] = input[legacyKey];
+    } else if (hasStart && !hasEnd) {
+      cfg[endKey] = input[startKey];
+    } else if (hasEnd && !hasStart) {
+      cfg[startKey] = input[endKey];
+    }
+
+    cfg[startKey] = Number(cfg[startKey]);
+    cfg[endKey] = Number(cfg[endKey]);
+
+    if (!Number.isFinite(cfg[startKey]) || cfg[startKey] < min || cfg[startKey] > max) {
+      throw new Error("invalid " + startKey);
+    }
+    if (!Number.isFinite(cfg[endKey]) || cfg[endKey] < min || cfg[endKey] > max) {
+      throw new Error("invalid " + endKey);
+    }
+    if (cfg[startKey] > cfg[endKey]) {
+      var tmp = cfg[startKey];
+      cfg[startKey] = cfg[endKey];
+      cfg[endKey] = tmp;
+    }
   }
 
   function normalizeConfig(input) {
@@ -449,8 +530,19 @@
     cfg.failOpen = parseBoolean(cfg.failOpen, true);
     var mode = String(cfg.mode || "response").toLowerCase();
     cfg.mode = mode === "request" || mode === "prepare" || mode === "probe" || mode === "inspect" ? mode : "response";
-    cfg.latitude = Number(cfg.latitude);
-    cfg.longitude = Number(cfg.longitude);
+    var alreadyRandomized =
+      input.__locationSpooferRandomized === true &&
+      Number.isFinite(Number(input.latitude)) &&
+      Number(input.latitude) >= -90 &&
+      Number(input.latitude) <= 90 &&
+      Number.isFinite(Number(input.longitude)) &&
+      Number(input.longitude) >= -180 &&
+      Number(input.longitude) <= 180;
+    normalizeCoordinateRange(cfg, input, "latitude_start", "latitude_end", "latitude", -90, 90);
+    normalizeCoordinateRange(cfg, input, "longitude_start", "longitude_end", "longitude", -180, 180);
+    cfg.latitude = alreadyRandomized ? Number(input.latitude) : randomInRange(cfg.latitude_start, cfg.latitude_end);
+    cfg.longitude = alreadyRandomized ? Number(input.longitude) : randomInRange(cfg.longitude_start, cfg.longitude_end);
+    cfg.__locationSpooferRandomized = true;
     cfg.horizontalAccuracy = Math.trunc(Number(cfg.horizontalAccuracy));
     cfg.verticalAccuracy = Math.trunc(Number(cfg.verticalAccuracy));
     cfg.altitude = Math.trunc(Number(cfg.altitude));
@@ -465,12 +557,6 @@
       cfg.rawLimit = 0;
     }
 
-    if (!Number.isFinite(cfg.latitude) || cfg.latitude < -90 || cfg.latitude > 90) {
-      throw new Error("invalid latitude");
-    }
-    if (!Number.isFinite(cfg.longitude) || cfg.longitude < -180 || cfg.longitude > 180) {
-      throw new Error("invalid longitude");
-    }
     return cfg;
   }
 
@@ -802,6 +888,10 @@
       "debug",
       "mode",
       "enabled",
+      "latitude_start",
+      "latitude_end",
+      "longitude_start",
+      "longitude_end",
       "latitude",
       "longitude",
       "altitude",
@@ -896,6 +986,10 @@
   function enrichArgsFromPluginStore(args) {
     var keys = [
       "enabled",
+      "latitude_start",
+      "latitude_end",
+      "longitude_start",
+      "longitude_end",
       "latitude",
       "longitude",
       "altitude",
@@ -953,10 +1047,14 @@
           : String($argument);
     console.log("Location spoofer $argument raw: " + raw);
     console.log(
-      "Location spoofer args parsed: lat=" +
-        args.latitude +
-        ", lng=" +
-        args.longitude +
+      "Location spoofer args parsed: latRange=" +
+        args.latitude_start +
+        ".." +
+        args.latitude_end +
+        ", lngRange=" +
+        args.longitude_start +
+        ".." +
+        args.longitude_end +
         ", configUrl=" +
         (resolveConfigUrl(args) || "<none>")
     );
@@ -1139,6 +1237,48 @@
     return out;
   }
 
+  function describeCoordinateConfig(cfg) {
+    cfg = cfg || {};
+    if (
+      cfg.latitude_start != null ||
+      cfg.latitude_end != null ||
+      cfg.longitude_start != null ||
+      cfg.longitude_end != null
+    ) {
+      return (
+        "latRange=" +
+        cfg.latitude_start +
+        ".." +
+        cfg.latitude_end +
+        ", lngRange=" +
+        cfg.longitude_start +
+        ".." +
+        cfg.longitude_end
+      );
+    }
+    return "lat/lng=" + cfg.latitude + "," + cfg.longitude;
+  }
+
+  function applyLegacyPointAsRange(cfg, source) {
+    source = source || {};
+    if (
+      hasOwn(source, "latitude") &&
+      !hasOwn(source, "latitude_start") &&
+      !hasOwn(source, "latitude_end")
+    ) {
+      cfg.latitude_start = source.latitude;
+      cfg.latitude_end = source.latitude;
+    }
+    if (
+      hasOwn(source, "longitude") &&
+      !hasOwn(source, "longitude_start") &&
+      !hasOwn(source, "longitude_end")
+    ) {
+      cfg.longitude_start = source.longitude;
+      cfg.longitude_end = source.longitude;
+    }
+  }
+
   function decodeBase64(value) {
     if (typeof atob === "function") {
       return atob(value);
@@ -1154,6 +1294,10 @@
     var scalarKeys = [
       "enabled",
       "mode",
+      "latitude_start",
+      "latitude_end",
+      "longitude_start",
+      "longitude_end",
       "latitude",
       "longitude",
       "address",
@@ -1275,7 +1419,7 @@
 
   function loadRuntimeConfigSync() {
     var args = readScriptArguments();
-    var cfg = mergeConfig(DEFAULT_CONFIG, configFromArgs(args));
+    var cfg = configFromArgs(args);
     var configUrl = resolveConfigUrl(args);
     var debug = parseBoolean(cfg.debug, false);
     var address = String(args.address || "").trim();
@@ -1286,12 +1430,10 @@
       var remoteCfg = readRemoteConfigCache(configUrl);
       if (remoteCfg) {
         cfg = mergeConfig(cfg, remoteCfg);
+        applyLegacyPointAsRange(cfg, remoteCfg);
         if (debug) {
           console.log(
-            "Location spoofer remote config cache hit -> " +
-              remoteCfg.latitude +
-              "," +
-              remoteCfg.longitude
+            "Location spoofer remote config cache hit -> " + describeCoordinateConfig(remoteCfg)
           );
         }
       }
@@ -1311,12 +1453,12 @@
         callback(normalizeConfig(cfg));
       } catch (err) {
         if (debug) {
-          console.log("Location spoofer config invalid: " + err.message + " | cfg lat/lng=" + cfg.latitude + "," + cfg.longitude);
+          console.log("Location spoofer config invalid: " + err.message + " | " + describeCoordinateConfig(cfg));
         }
-        if (!Number.isFinite(Number(cfg.latitude)) || !Number.isFinite(Number(cfg.longitude))) {
-          cfg.latitude = DEFAULT_CONFIG.latitude;
-          cfg.longitude = DEFAULT_CONFIG.longitude;
-        }
+        cfg.latitude_start = DEFAULT_CONFIG.latitude_start;
+        cfg.latitude_end = DEFAULT_CONFIG.latitude_end;
+        cfg.longitude_start = DEFAULT_CONFIG.longitude_start;
+        cfg.longitude_end = DEFAULT_CONFIG.longitude_end;
         callback(normalizeConfig(cfg));
       }
     }
@@ -1341,9 +1483,10 @@
       if (data) {
         writeRemoteConfigCache(configUrl, data);
         cfg = mergeConfig(cfg, data);
+        applyLegacyPointAsRange(cfg, data);
         if (debug) {
           console.log(
-            "Location spoofer remote config loaded -> " + data.latitude + "," + data.longitude
+            "Location spoofer remote config loaded -> " + describeCoordinateConfig(data)
           );
         }
       } else if (debug) {
@@ -1373,7 +1516,7 @@
           writeRemoteConfigCache(configUrl, data);
           if (debug) {
             console.log(
-              "Location spoofer config cron cached -> " + data.latitude + "," + data.longitude
+              "Location spoofer config cron cached -> " + describeCoordinateConfig(data)
             );
           }
         } else if (debug) {
